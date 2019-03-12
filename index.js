@@ -1,4 +1,6 @@
 const apiai = require("apiai");
+//Import Config file
+const config = require("./config");
 const express = require("express");
 const bodyParser = require("body-parser");
 const uuid = require("uuid");
@@ -6,16 +8,10 @@ const axios = require('axios');
 const app = express();
 
 
-//Import Config file
-const config = require("./config");
+
 
 const cli = require('./config/cli').console
 
-const apiAiService = apiai(config.API_AI_CLIENT_ACCESS_TOKEN, {
-    language: "en",
-    requestSource: "fb"
-  });
-const sessionIds = new Map();
 
 //setting Port
 app.set("port", process.env.PORT || 5000);
@@ -32,6 +28,12 @@ app.use(
 
 // Process application/json
 app.use(bodyParser.json());
+
+const apiAiService = apiai(config.API_AI_CLIENT_ACCESS_TOKEN, {
+  language: "en",
+  requestSource: "fb"
+});
+const sessionIds = new Map();
 
 // Index route
 app.get("/", function (req, res) {
@@ -78,8 +80,10 @@ app.post("/webhook/", function (req, res) {
         pageEntry.messaging.forEach(function (messagingEvent) {
           if (messagingEvent.message) {
             receivedMessage(messagingEvent);
+            console.log("received message");
           } else if (messagingEvent.postback) {
             receivedPostback(messagingEvent);
+            console.log("receive postback");
           } else {
             console.log("Webhook received unknown messagingEvent: ",messagingEvent);
           }
@@ -100,7 +104,9 @@ app.post("/webhook/", function (req, res) {
     if (!sessionIds.has(senderID)) {
       sessionIds.set(senderID, uuid.v1());
     }
-
+  console.log("Received message for user %d and page %d at %d with message:", senderID, recipientID, timeOfMessage);
+  console.log(JSON.stringify(message));
+  
     var messageId = message.mid;
     var appId = message.app_id;
     var metadata = message.metadata;
@@ -117,13 +123,6 @@ app.post("/webhook/", function (req, res) {
     }
   }
 
-  function handleMessageAttachments(messageAttachments, senderID) {
-    console.log(messageAttachments);
-
-    //for now just reply
-    sendTextMessage(senderID, "Attachment received. Thank you.");
-  }
-
   function sendToApiAi(sender, text) {
     sendTypingOn(sender);
     let apiaiRequest = apiAiService.textRequest(text, {
@@ -133,12 +132,23 @@ app.post("/webhook/", function (req, res) {
     apiaiRequest.on("response", response => {
       if (isDefined(response.result)) {
         handleApiAiResponse(sender, response);
+        console.log(response);
+
       }
     });
 
     apiaiRequest.on("error", error => console.error(error));
     apiaiRequest.end();
   }
+
+  function handleMessageAttachments(messageAttachments, senderID) {
+    console.log(messageAttachments);
+
+    //for now just reply
+    sendTextMessage(senderID, "Attachment received. Thank you.");
+  }
+
+
 
   /*
  * Postback Event
@@ -173,8 +183,10 @@ function receivedPostback(event) {
       handleApiAiAction(senderID, "beverages-menu");
       break;
     case "quickbooking":
-      handleApiAiAction(senderID, "quick-booking");
+      handleApiAiAction(senderID, "newquickbooking");
       break;
+    case "Today":
+      handleApiAiAction(senderID, "quick-booking");
   }
   console.log(
     "Received postback for user %d and page %d with payload '%s' " + "at %d",
@@ -270,9 +282,40 @@ const sendTypingOff = (recipientId) => {
     await callSendAPI(messageData);
   }
 
+  function handleApiAiResponse(sender, response) {
+    let responseText = response.result.fulfillment.speech;
+    let responseData = response.result.fulfillment.data;
+    let messages = response.result.fulfillment.messages;
+    let action = response.result.action;
+    let contexts = response.result.contexts;
+    let parameters = response.result.parameters;
+   
+    sendTypingOff(sender);
+   
+   if (responseText == "" && !isDefined(action)) {
+      //api ai could not evaluate input.
+      console.log("Unknown query" + response.result.resolvedQuery);
+      sendTextMessage(
+        sender,
+        "I'm not sure what you want. Can you be more specific?"
+      );
+    } else if (isDefined(action)) {
+      handleApiAiAction(sender, action, responseText, contexts, parameters);
+    } else if (isDefined(responseData) && isDefined(responseData.facebook)) {
+      try {
+        console.log("Response as formatted message" + responseData.facebook);
+        sendTextMessage(sender, responseData.facebook);
+      } catch (err) {
+        sendTextMessage(sender, err.message);
+      }
+    } else if (isDefined(responseText)) {
+      sendTextMessage(sender, responseText);
+    }
+  }
+
   function handleApiAiAction(sender, action, responseText, contexts, parameters) {
     switch (action) {
-     case "send-text":
+     case "input.welcome":
        //var responseText = "This is example of Text message."
        sendTextMessage(sender, responseText);
        break;
@@ -341,8 +384,8 @@ const sendTypingOff = (recipientId) => {
        //"subtitle": "Mon-SUN 11:00 AM - 11:00PM",
        "buttons": [
          {
-           "text": "Show Main Course",
-           "postback": "maincourse"
+           "text": "Show Burgers",
+           "postback": "burgers"
          }
        ]
      },{
@@ -483,12 +526,12 @@ const sendTypingOff = (recipientId) => {
    handleCardMessages(elements, sender)
  break;
  
- case "quick-booking":
+ case "quickbooking":
      var responseText = "Thank you for using our booking service. Which day do want to booking?"
      var replies = [{
          "content_type": "text",
          "title": "Today",
-         "payload": "today",
+         "payload": "Today",
      },
      {
          "content_type": "text",
@@ -502,12 +545,33 @@ const sendTypingOff = (recipientId) => {
      }];
      sendQuickReply(sender, responseText, replies)
  break;
+
+ case "quick-booking":
+ var responseText = "How many people?"
+ var replies = [{
+     "content_type": "text",
+     "title": "1",
+     "payload": "today",
+ },
+ {
+     "content_type": "text",
+     "title": "2",
+     "payload": "tomorrow",
+ },
+ {
+     "content_type": "text",
+     "title": "3",
+     "payload": "nexttwoday",
+ }];
+ sendQuickReply(sender, responseText, replies)
+break;
      default:
        //unhandled action, just send back the text
      sendTextMessage(sender, responseText);
    }
  }
 
+ 
  async function handleCardMessages(messages, sender) {
     let elements = [];
     for (var m = 0; m < messages.length; m++) {
@@ -576,33 +640,3 @@ const sendTypingOff = (recipientId) => {
 
 
 
-  function handleApiAiResponse(sender, response) {
-  let responseText = response.result.fulfillment.speech;
-  let responseData = response.result.fulfillment.data;
-  let messages = response.result.fulfillment.messages;
-  let action = response.result.action;
-  let contexts = response.result.contexts;
-  let parameters = response.result.parameters;
- 
-  sendTypingOff(sender);
- 
- if (responseText == "" && !isDefined(action)) {
-    //api ai could not evaluate input.
-    console.log("Unknown query" + response.result.resolvedQuery);
-    sendTextMessage(
-      sender,
-      "I'm not sure what you want. Can you be more specific?"
-    );
-  } else if (isDefined(action)) {
-    handleApiAiAction(sender, action, responseText, contexts, parameters);
-  } else if (isDefined(responseData) && isDefined(responseData.facebook)) {
-    try {
-      console.log("Response as formatted message" + responseData.facebook);
-      sendTextMessage(sender, responseData.facebook);
-    } catch (err) {
-      sendTextMessage(sender, err.message);
-    }
-  } else if (isDefined(responseText)) {
-    sendTextMessage(sender, responseText);
-  }
-}
